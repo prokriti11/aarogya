@@ -1,11 +1,7 @@
----
-title: Aarogya API
-emoji: 🩺
-colorFrom: green
-colorTo: gray
-sdk: docker
-app_port: 7860
-pinned: false
----
+# Aarogya API
 
-Backend for Aarogya. See the main repository README.
+FastAPI backend for Aarogya: hybrid retrieval (pgvector + Postgres full-text, RRF), Groq-hosted bots, and an evaluation harness (rule checks, LLM judge, human review, Cohen's kappa).
+
+Deployed on Render. Live API docs: https://aarogya-api-62r4.onrender.com/docs
+
+See the main repository README for the full write-up.
