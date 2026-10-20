@@ -2,7 +2,7 @@
 
 Aarogya answers health-insurance questions from public policy wordings. The project's real subject is **evaluation**: every bot version runs against a fixed 41-case suite, gets scored by rule checks and an LLM judge, and disputed cases go to a human whose labels measure how far the judge can be trusted.
 
-**Live demo:** `<your Vercel URL>`  **API docs:** `<your HF Space URL>/docs`
+**Live demo:** `<your Vercel URL>`  **API docs:** `<your Render URL>/docs`
 
 <!-- Add screenshots: home (results strip), run dashboard, chat inspector, review page -->
 
@@ -15,7 +15,7 @@ LLM support bots fail silently: they sound confident while inventing waiting per
                   │ Chat + answer inspector │ Runs │ Compare │ Review │
                   └──────────────────────────┬───────────────────────┘
                                              │ REST
-┌──────────────────────────── FastAPI (Hugging Face Spaces, Docker) ────────────────────────────┐
+┌───────────────────────────────── FastAPI (Render, Docker) ─────────────────────────────────────┐
 │ Bot turn:  hybrid retrieval (pgvector + full-text, RRF) → confidence gate → Groq LLM (JSON)    │
 │            → citation validation → full trace persisted                                        │
 │ Eval run:  suite × bot version → rule checks → LLM judge (Gemini, different model family)      │
@@ -48,7 +48,7 @@ LLM support bots fail silently: they sound confident while inventing waiting per
 | Piece | Service |
 |---|---|
 | Frontend | Next.js 14 + Tailwind on Vercel |
-| API | FastAPI on Hugging Face Spaces (Docker) |
+| API | FastAPI on Render (Docker, free web service) |
 | Database | Neon Postgres + pgvector |
 | Bot LLMs | Groq: gpt-oss-20b, gpt-oss-120b |
 | Judge | Gemini (Google AI Studio free tier) |
@@ -76,19 +76,13 @@ Sign in with your admin token via "Owner sign-in" to start runs and label result
 
 ## Deploy
 1. **Neon:** create a project (Singapore region). Use the connection string in the format shown in `.env.example`.
-2. **Hugging Face Space:** create a new Space with the Docker SDK. Push the `backend/` folder as the Space's root:
-   ```bash
-   git remote add space https://huggingface.co/spaces/<user>/aarogya-api
-   git subtree push --prefix backend space main
-   ```
-   Add secrets: `DATABASE_URL`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `ADMIN_TOKEN`, `CORS_ORIGINS` (your Vercel URL).
-3. **Ingest** against the deployed API:
-   `curl -X POST https://<space>.hf.space/admin/ingest -H "X-Admin-Token: …" -F "file=@policy.pdf"`
-4. **Vercel:** import the GitHub repo, set **Root Directory** to `frontend`, and add `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_GITHUB_URL`.
-5. Sign in on the live site and start a run for each bot version, so visitors see real results.
+2. **Render:** New → Web Service → connect this GitHub repo. Set **Root Directory** to `backend`, **Language** to Docker, **Instance type** to Free, and **Health Check Path** to `/health`.
+   Add environment variables: `DATABASE_URL`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `ADMIN_TOKEN`, `CORS_ORIGINS` (your Vercel URL).
+3. **Ingest and evaluate locally.** The local backend and the deployed one share the Neon database, so documents, eval runs, and labels created locally appear on the live site. This keeps slow eval runs off the free instance.
+4. **Vercel:** import the GitHub repo, set **Root Directory** to `frontend`, and add `NEXT_PUBLIC_API_URL` (your Render URL) and `NEXT_PUBLIC_GITHUB_URL`.
 
 ## Known limits
-- Free hosting sleeps when idle. The first request can take up to a minute, and the UI says so.
+- The free Render instance sleeps after 15 idle minutes. The first request then takes about a minute, and the UI says so.
 - Free-tier rate limits make a full run take several minutes. Only one run can execute at a time.
 - A run in progress is marked failed if the host restarts mid-run.
 - Cost figures use list prices hard-coded in `backend/app/evals.py`. Verify them before quoting.

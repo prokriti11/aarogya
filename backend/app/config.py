@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # LLM-as-judge. A different model family than the bots under test avoids self-preference bias.
     gemini_api_key: str | None = None
     judge_provider: str = "gemini"         # gemini | groq
-    judge_model: str = "gemini-2.5-flash"  # if groq: a non-Llama model, e.g. "openai/gpt-oss-120b"
+    judge_model: str = "gemini-3.5-flash"  # if groq: a non-Llama model, e.g. "openai/gpt-oss-120b"
 
     eval_concurrency: int = 2              # free-tier rate limits are tight
     latency_budget_ms: int = 4000
