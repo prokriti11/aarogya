@@ -49,7 +49,35 @@ def build_judge_input(question: str, category: str, expected_statuses: list, exp
             f"BOT RESPONSE:\nstatus: {status}\nanswer: {answer}")
 
 
-_http = httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0))
+_http = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))  # thinking models can be slow
+
+
+# Free-tier Gemini allows only a few requests per minute. Space calls out instead of
+# bursting and burning retries (a burst is what turned 26 of 41 judgements into errors).
+JUDGE_MIN_INTERVAL_S = 6.0
+JUDGE_ATTEMPTS = 6
+_pace_lock = asyncio.Lock()
+_last_call = 0.0
+
+
+async def _pace():
+    global _last_call
+    async with _pace_lock:
+        wait = _last_call + JUDGE_MIN_INTERVAL_S - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call = time.monotonic()
+
+
+def _retry_delay(r: httpx.Response, attempt: int) -> float:
+    """Use the delay Gemini asks for (RetryInfo, e.g. "17s") when it gives one."""
+    try:
+        for d in r.json().get("error", {}).get("details", []):
+            if "retryDelay" in d:
+                return min(float(str(d["retryDelay"]).rstrip("s")) + 1, 65)
+    except (ValueError, AttributeError):
+        pass
+    return min(5 * 2 ** attempt, 60)
 
 
 async def _gemini(prompt: str) -> tuple[dict, dict, int]:
@@ -59,12 +87,19 @@ async def _gemini(prompt: str) -> tuple[dict, dict, int]:
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
-    for attempt in range(4):
+    last = "no response"
+    for attempt in range(JUDGE_ATTEMPTS):
+        await _pace()
         t0 = time.perf_counter()
-        r = await _http.post(url, params={"key": settings.gemini_api_key}, json=body)
+        try:
+            r = await _http.post(url, params={"key": settings.gemini_api_key}, json=body)
+        except httpx.TransportError as e:  # timeouts / network blips: retry, then report as a judge error
+            last = repr(e)
+            await asyncio.sleep(min(5 * 2 ** attempt, 60)); continue
         ms = int((time.perf_counter() - t0) * 1000)
         if r.status_code in (429, 500, 503):
-            await asyncio.sleep(min(2 ** (attempt + 1), 20)); continue
+            last = f"{r.status_code}: {r.text[:150]}"
+            await asyncio.sleep(_retry_delay(r, attempt)); continue
         if r.status_code != 200:
             raise LLMError(f"gemini {r.status_code}: {r.text[:200]}")
         data = r.json()
@@ -73,7 +108,7 @@ async def _gemini(prompt: str) -> tuple[dict, dict, int]:
             return json.loads(text), data.get("usageMetadata", {}), ms
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise LLMError("gemini returned unparseable output") from e
-    raise LLMError("gemini retries exhausted")
+    raise LLMError(f"gemini retries exhausted (last: {last})")
 
 
 async def judge(prompt: str) -> tuple[JudgeOut, dict]:
@@ -82,8 +117,9 @@ async def judge(prompt: str) -> tuple[JudgeOut, dict]:
             raise LLMError("GEMINI_API_KEY not set (or set JUDGE_PROVIDER=groq)")
         raw, usage, ms = await _gemini(prompt)
     else:
+        await _pace()
         raw, usage, ms = await chat_json(settings.judge_model,
                                          [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": prompt}],
-                                         temperature=0, max_tokens=500)
+                                         temperature=0, max_tokens=2000)
     out = JudgeOut.model_validate(raw)
     return out, {"latency_ms": ms, "usage": usage}

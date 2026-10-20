@@ -26,7 +26,7 @@ PRICING = {
 SEED_FILE = Path(__file__).parent.parent / "seeds" / "suite_v1.json"
 log = logging.getLogger("uvicorn.error")
 CASE_ATTEMPTS = 3
-CASE_TIMEOUT_S = 150   # one case = bot call + judge call, including rate-limit backoff
+CASE_TIMEOUT_S = 600   # one case = bot call + judge call (slow thinking judge), including backoff
 
 
 # ----------------------------- seeding -----------------------------
@@ -103,17 +103,14 @@ async def _eval_case(run_id: int, bot_id: int, case: TestCase, sem: asyncio.Sema
             log.error("run %s case %s could not be recorded: %r", run_id, case.case_key, e)
 
 
-async def _eval_case_once(run_id: int, bot_id: int, case: TestCase):
-    async with SessionLocal() as s:
-        bot = await s.get(BotVersion, bot_id)
-        out = await run_turn(s, bot, case.question, channel="eval")
-    checks = run_checks(case, out)
+async def _judge_and_score(run_id: int, case: TestCase, context: list, status: str, answer: str,
+                           checks: dict) -> tuple[dict, bool, list]:
+    """Judge one bot answer and combine with the deterministic checks -> (judge, passed, review_reasons)."""
     hard_ok = all(v for k, v in checks.items() if k in HARD_CHECKS)
-
     reasons, judge_dict, judge_pass = [], None, False
     try:
         j, meta = await judge(build_judge_input(case.question, case.category, case.expected_statuses,
-                                                case.expected_behavior, out["context"], out["status"], out["answer"]))
+                                                case.expected_behavior, context, status, answer))
         judge_pass = j.rule_verdict() == "pass"
         judge_dict = {**j.model_dump(), "rule_verdict": j.rule_verdict(), **meta}
         if j.verdict != j.rule_verdict():
@@ -128,10 +125,49 @@ async def _eval_case_once(run_id: int, bot_id: int, case: TestCase):
     if _sampled(run_id, case.case_key):
         reasons.append("random_sample")
 
+    return judge_dict, hard_ok and judge_pass, reasons
+
+
+async def rejudge_errors(run_id: int, everything: bool = False) -> int:
+    """Re-run the judge for results whose judge call errored (rate limits etc.), or for every result
+    with everything=True (e.g. after switching judge model, so one run has one judge). The bot's
+    answers are kept as they were. Returns how many judge errors remain."""
+    async with SessionLocal() as s:
+        rows = [r for r in (await s.scalars(select(EvalResult).where(EvalResult.run_id == run_id)
+                                            .options(selectinload(EvalResult.case)))).all()
+                if everything or (r.judge and "error" in r.judge)]
+    for i, r in enumerate(rows, 1):
+        judge_dict, passed, reasons = await _judge_and_score(run_id, r.case, r.context, r.status, r.answer, r.checks)
+        async with SessionLocal() as s:
+            await s.execute(update(EvalResult).where(EvalResult.id == r.id).values(
+                judge=judge_dict, passed=passed, needs_review=bool(reasons), review_reasons=reasons))
+            await s.commit()
+        print(f"  re-judged {i}/{len(rows)} {r.case.case_key}: {'error' if 'error' in judge_dict else judge_dict['rule_verdict']}")
+    async with SessionLocal() as s:
+        run = await s.get(EvalRun, run_id)
+        run.summary = await compute_summary(s, run_id)
+        if everything:
+            run.judge_model = settings.judge_model
+        await s.commit()
+        remaining = len([r for r in (await s.scalars(select(EvalResult).where(EvalResult.run_id == run_id))).all()
+                         if r.judge and "error" in r.judge])
+    return remaining
+
+
+async def _eval_case_once(run_id: int, bot_id: int, case: TestCase):
+    async with SessionLocal() as s:
+        bot = await s.get(BotVersion, bot_id)
+        out = await run_turn(s, bot, case.question, channel="eval")
+    checks = run_checks(case, out)
+    hard_ok = all(v for k, v in checks.items() if k in HARD_CHECKS)
+
+    judge_dict, passed, reasons = await _judge_and_score(run_id, case, out["context"], out["status"],
+                                                         out["answer"], checks)
+
     async with SessionLocal() as s:
         s.add(EvalResult(run_id=run_id, case_id=case.id, status=out["status"], answer=out["answer"],
                          context=out["context"], trace=out["trace"], checks=checks, judge=judge_dict,
-                         passed=hard_ok and judge_pass, needs_review=bool(reasons), review_reasons=reasons))
+                         passed=passed, needs_review=bool(reasons), review_reasons=reasons))
         await s.execute(update(EvalRun).where(EvalRun.id == run_id).values(completed=EvalRun.completed + 1))
         await s.commit()
 

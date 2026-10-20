@@ -19,10 +19,10 @@ from sqlalchemy import select, update
 
 from app.config import settings
 from app.db import SessionLocal
-from app.evals import execute_run, seed_suite
+from app.evals import execute_run, rejudge_errors, seed_suite
 from app.models import BotVersion, EvalRun, TestSuite
 
-BOTS = ["v1-gptoss120b", "v1-gptoss20b"]
+BOTS = sys.argv[1:] or ["v1-gptoss120b", "v1-gptoss20b"]   # e.g. python -m scripts.run_all v1-gptoss20b
 JUDGE_CANDIDATES = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.1-flash-lite"]
 ENV_FILE = Path(__file__).parent.parent / ".env"
 
@@ -75,17 +75,22 @@ async def run_one(bot_name: str, suite_id: int) -> dict | None:
                 print(f"  {r.completed}/{r.total} cases done")
                 last = r.completed
     await task
+    print("  re-judging any cases where the judge errored…")
+    left = await rejudge_errors(run_id)
+    if left:
+        print(f"  {left} judge errors remain: later, run  python -m scripts.rejudge {run_id}")
     async with SessionLocal() as s:
         r = await s.get(EvalRun, run_id)
         return {"id": run_id, "status": r.status, "error": r.error, **(r.summary or {})}
 
 
 async def main():
-    print("Checking which Gemini judge model works…")
-    model = pick_judge()
-    settings.judge_model = model
-    save_judge_to_env(model)
-    print(f"  judge: {model} (saved to .env)")
+    if settings.judge_provider == "gemini":
+        print("Checking which Gemini judge model works…")
+        model = pick_judge()
+        settings.judge_model = model
+        save_judge_to_env(model)
+    print(f"  judge: {settings.judge_provider}:{settings.judge_model}")
 
     await seed_suite()
     async with SessionLocal() as s:
